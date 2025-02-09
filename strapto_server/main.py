@@ -50,8 +50,13 @@ class StrapToServer:
 
     async def connect(self):
         """Connect all components."""
-        await self.webrtc_manager.connect(self.config)
-        await self.model_interface.connect(self.config)
+        # WebRTC manager doesn't need explicit connection
+        # Just initialize any internal state
+        logger.info("Initializing WebRTC manager...")
+        
+        # Connect model interface
+        logger.info("Connecting model interface...")
+        await self.model_interface.connect()
 
     async def start(self):
         """
@@ -117,9 +122,11 @@ class StrapToServer:
             logger.error(f"Error disconnecting model interface: {e}")
 
         try:
-            await self.webrtc_manager.disconnect()
+            # WebRTC manager cleanup
+            logger.info("Closing WebRTC connections...")
+            await self.webrtc_manager.close_all_connections()
         except Exception as e:
-            logger.error(f"Error disconnecting WebRTC manager: {e}")
+            logger.error(f"Error closing WebRTC connections: {e}")
 
         # Clean up event emitter - remove all registered listeners
         # Create a copy of the listeners to avoid modifying while iterating

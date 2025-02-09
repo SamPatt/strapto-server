@@ -76,19 +76,17 @@ async def test_component_connection(server):
     """Test that components connect in the correct order."""
     await server.connect()
     
-    server.webrtc_manager.connect.assert_called_once_with(server.config)
-    server.model_interface.connect.assert_called_once_with(server.config)
+    server.model_interface.connect.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_component_connection_failure(server):
     """Test handling of component connection failures."""
-    server.webrtc_manager.connect.side_effect = Exception("Connection failed")
+    server.model_interface.connect.side_effect = Exception("Connection failed")
     
     with pytest.raises(Exception):
         await server.connect()
     
-    server.webrtc_manager.connect.assert_called_once()
-    server.model_interface.connect.assert_not_called()
+    server.model_interface.connect.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_graceful_shutdown(server):
@@ -137,7 +135,6 @@ async def test_shutdown_with_failed_disconnection(server):
 @pytest.mark.asyncio
 async def test_server_start_and_stop(server):
     """Integration test for server startup and shutdown."""
-    # Create a task to stop the server after a short delay
     async def stop_server():
         await asyncio.sleep(0.1)
         await server.shutdown()
@@ -149,9 +146,7 @@ async def test_server_start_and_stop(server):
         if not stop_task.done():
             await stop_task
     
-    server.webrtc_manager.connect.assert_called_once()
     server.model_interface.connect.assert_called_once()
-    server.webrtc_manager.disconnect.assert_called_once()
     server.model_interface.disconnect.assert_called_once()
 
 @pytest.mark.asyncio
