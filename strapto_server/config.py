@@ -26,23 +26,21 @@ class ServerConfig:
     """
     Dataclass to store all server configuration parameters.
     Using a dataclass provides type hints and makes the configuration immutable.
+    
+    Required parameters come first, followed by optional parameters with defaults.
     """
-    # WebRTC configuration
+    # Required parameters (no defaults)
     webrtc_host: str
     webrtc_port: int
     stun_server: str
-    turn_server: Optional[str] = None
-    
-    # Signaling server details
     signaling_url: str
-    room_id: Optional[str] = None
     
-    # Model interface settings
+    # Optional parameters (with defaults)
     model_host: str = "localhost"
     model_port: int = 8080
     model_type: str = "generic"  # e.g., "ollama", "llamacpp", "lmstudio"
-    
-    # Server behavior settings
+    turn_server: Optional[str] = None
+    room_id: Optional[str] = None
     max_connections: int = 10
     enable_chat: bool = True
     enable_suggestions: bool = True
