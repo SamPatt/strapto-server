@@ -91,22 +91,22 @@ class StrapToServer:
 
     async def shutdown(self, sig: Optional[signal.Signals] = None):
         """
-        Gracefully shutdown all server components.
+        Gracefully shut down the server and all its components.
 
         Args:
-            sig: Optional signal that triggered the shutdown.
+            sig: Optional signal that triggered the shutdown
         """
-        if sig:
-            logger.info(f"Received shutdown signal: {sig.name}")
-
         if not self.running:
-            logger.info("Server already shutting down...")
+            logger.debug("Server already shut down or shutting down")
             return
 
+        if sig:
+            logger.info(f"Received shutdown signal: {sig.name}")
+        
+        logger.info("Starting graceful shutdown...")
         self.running = False
-        logger.info("Initiating StrapTo server shutdown...")
 
-        # Cancel all running tasks.
+        # Cancel all running tasks
         for task in self.tasks:
             if not task.done():
                 task.cancel()
@@ -115,23 +115,20 @@ class StrapToServer:
                 except asyncio.CancelledError:
                     pass
 
-        # Disconnect components in reverse order.
+        # Disconnect components in reverse order
         try:
             await self.model_interface.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting model interface: {e}")
 
         try:
-            # WebRTC manager cleanup
-            logger.info("Closing WebRTC connections...")
-            await self.webrtc_manager.close_all_connections()
+            await self.webrtc_manager.disconnect()
         except Exception as e:
-            logger.error(f"Error closing WebRTC connections: {e}")
+            logger.error(f"Error disconnecting WebRTC manager: {e}")
 
-        # Clean up event emitter - remove all registered listeners
-        # Create a copy of the listeners to avoid modifying while iterating
+        # Remove event listeners
         listeners_to_remove = [
-            (event_type, list(listeners))
+            (event_type, listeners.copy())
             for event_type, listeners in self.event_emitter._listeners.items()
         ]
         
