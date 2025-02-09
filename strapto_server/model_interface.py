@@ -15,6 +15,7 @@ The interface handles:
 import abc
 import asyncio
 import logging
+import json
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 from dataclasses import dataclass
 
@@ -135,27 +136,179 @@ class OllamaInterface(ModelInterface):
     Implementation of ModelInterface for Ollama.
     """
     
+    def __init__(self, config: Optional[ServerConfig] = None):
+        super().__init__(config)
+        self.base_url = "http://localhost:11434"
+        self.model_name = config.model_name if config and config.model_name else "llama2"
+        self.session = None
+        self._watch_task = None
+        self._watching = False
+
     async def connect(self) -> bool:
         """Connect to local Ollama instance."""
         try:
-            # TODO: Implement Ollama-specific connection logic
-            self.ready = True
-            logger.info("Connected to Ollama")
-            return True
+            import aiohttp
+            self.session = aiohttp.ClientSession()
+            
+            # Test connection by getting version
+            async with self.session.get(f"{self.base_url}/api/version") as response:
+                if response.status == 200:
+                    self.ready = True
+                    logger.info(f"Connected to Ollama (model: {self.model_name})")
+                    # Start the watcher when connection is established
+                    await self.start_watching()
+                    return True
+                else:
+                    logger.error(f"Failed to connect to Ollama: HTTP {response.status}")
+                    return False
         except Exception as e:
             logger.error(f"Failed to connect to Ollama: {e}")
             return False
 
     async def disconnect(self) -> None:
-        """Disconnect from Ollama."""
-        # TODO: Implement cleanup logic
+        """Disconnect from Ollama and stop watching."""
+        await self.stop_watching()
+        if self.session:
+            await self.session.close()
         self.ready = False
         logger.info("Disconnected from Ollama")
 
+    async def start_watching(self) -> None:
+        """Start watching Ollama activity."""
+        if self._watching:
+            return
+        
+        self._watching = True
+        self._watch_task = asyncio.create_task(self._watch_ollama())
+        logger.info("Started watching Ollama activity")
+
+    async def stop_watching(self) -> None:
+        """Stop watching Ollama activity."""
+        self._watching = False
+        if self._watch_task:
+            self._watch_task.cancel()
+            try:
+                await self._watch_task
+            except asyncio.CancelledError:
+                pass
+            self._watch_task = None
+        logger.info("Stopped watching Ollama activity")
+
+    async def _watch_ollama(self) -> None:
+        """Watch Ollama activity and capture outputs."""
+        import time
+        
+        while self._watching:
+            try:
+                # Check for running models
+                async with self.session.get(f"{self.base_url}/api/ps") as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        running_models = data.get("models", [])
+                        
+                        if running_models:
+                            # Log active models for debugging
+                            model_names = [m.get("name") for m in running_models]
+                            logger.debug(f"Active Ollama models: {model_names}")
+                            
+                            # Create an output for each active model
+                            for model in running_models:
+                                output = ModelOutput(
+                                    content={
+                                        "model_name": model.get("name"),
+                                        "status": "active",
+                                        "size": model.get("size"),
+                                        "details": model.get("details", {})
+                                    },
+                                    output_type="status",
+                                    timestamp=time.time(),
+                                    metadata={
+                                        "size_vram": model.get("size_vram"),
+                                        "expires_at": model.get("expires_at")
+                                    }
+                                )
+                                await self._output_queue.put(output)
+                
+                # Wait before next check
+                await asyncio.sleep(1.0)  # Adjust polling interval as needed
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error watching Ollama: {e}")
+                await asyncio.sleep(5.0)  # Longer delay on error
+
     async def send_input(self, content: Union[str, Dict[str, Any]]) -> None:
         """Send prompt to Ollama and stream responses."""
-        # TODO: Implement Ollama API interaction
-        pass
+        import time
+        
+        if not self.session:
+            logger.error("Not connected to Ollama")
+            return
+
+        try:
+            # Convert input to appropriate format
+            if isinstance(content, str):
+                data = {
+                    "model": self.model_name,
+                    "prompt": content,
+                    "stream": True
+                }
+            else:
+                # Handle JSON input (could be used for advanced parameters)
+                data = {
+                    "model": self.model_name,
+                    "prompt": content.get("prompt", ""),
+                    "stream": True,
+                    **content  # Include any additional parameters
+                }
+
+            async with self.session.post(f"{self.base_url}/api/generate", json=data) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Ollama API error: {error_text}")
+                    return
+
+                # Stream the responses
+                async for line in response.content:
+                    if not line:
+                        continue
+                        
+                    try:
+                        result = json.loads(line)
+                        
+                        # Create model output from response
+                        output = ModelOutput(
+                            content=result.get("response", ""),
+                            output_type="text",
+                            timestamp=time.time(),
+                            metadata={
+                                "done": result.get("done", False),
+                                "total_duration": result.get("total_duration"),
+                                "eval_count": result.get("eval_count"),
+                                "eval_duration": result.get("eval_duration")
+                            }
+                        )
+                        
+                        await self._output_queue.put(output)
+                        
+                        # If this is the final response, we're done
+                        if result.get("done", False):
+                            break
+                            
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse Ollama response: {e}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"Error communicating with Ollama: {e}")
+            # Send error message as output
+            error_output = ModelOutput(
+                content=f"Error: {str(e)}",
+                output_type="error",
+                timestamp=time.time()
+            )
+            await self._output_queue.put(error_output)
 
 def create_model_interface(model_type: str, config: Optional[ServerConfig] = None) -> ModelInterface:
     """

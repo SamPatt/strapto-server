@@ -45,6 +45,10 @@ class ServerConfig:
     enable_chat: bool = True
     enable_suggestions: bool = True
     buffer_size: int = 1024 * 1024  # 1MB buffer for output streaming
+    model_name: Optional[str] = None
+    host: str = "localhost"
+    port: int = 8000
+    debug: bool = False
 
 def load_config(config_path: Optional[str] = None) -> ServerConfig:
     """
@@ -92,16 +96,20 @@ def load_config(config_path: Optional[str] = None) -> ServerConfig:
         "STRAPTO_MAX_CONNECTIONS": "max_connections",
         "STRAPTO_ENABLE_CHAT": "enable_chat",
         "STRAPTO_ENABLE_SUGGESTIONS": "enable_suggestions",
-        "STRAPTO_BUFFER_SIZE": "buffer_size"
+        "STRAPTO_BUFFER_SIZE": "buffer_size",
+        "STRAPTO_MODEL_NAME": "model_name",
+        "STRAPTO_HOST": "host",
+        "STRAPTO_PORT": "port",
+        "STRAPTO_DEBUG": "debug"
     }
     
     # Update config with environment variables
     for env_var, config_key in env_mapping.items():
         if env_value := os.getenv(env_var):
             # Convert string values to appropriate types
-            if config_key in ["webrtc_port", "model_port", "max_connections", "buffer_size"]:
+            if config_key in ["webrtc_port", "model_port", "max_connections", "buffer_size", "port"]:
                 config_dict[config_key] = int(env_value)
-            elif config_key in ["enable_chat", "enable_suggestions"]:
+            elif config_key in ["enable_chat", "enable_suggestions", "debug"]:
                 config_dict[config_key] = env_value.lower() == "true"
             else:
                 config_dict[config_key] = env_value
