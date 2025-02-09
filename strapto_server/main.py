@@ -21,7 +21,7 @@ from typing import Optional, Set
 
 from .config import get_config, ServerConfig
 from .webrtc_manager import WebRTCManager
-from .model_interface import GenericModelInterface
+from .model_interface import create_model_interface
 from .event_handler import EventEmitter
 
 # Configure logging
@@ -44,7 +44,13 @@ class StrapToServer:
         self.config: ServerConfig = get_config()
         self.event_emitter = EventEmitter()
         self.webrtc_manager = WebRTCManager(config=self.config, event_emitter=self.event_emitter)
-        self.model_interface = GenericModelInterface(self.event_emitter)
+        
+        # Create Ollama interface instead of generic interface
+        self.model_interface = create_model_interface(
+            "ollama", 
+            self.config
+        )
+        
         self.running = False
         self.tasks: Set[asyncio.Task] = set()
 
@@ -55,8 +61,15 @@ class StrapToServer:
         logger.info("Initializing WebRTC manager...")
         
         # Connect model interface
-        logger.info("Connecting model interface...")
-        await self.model_interface.connect()
+        logger.info("Connecting model interface and starting Ollama watcher...")
+        connected = await self.model_interface.connect()
+        if not connected:
+            logger.error("Failed to connect to Ollama interface")
+            # You might want to handle this error case differently
+            return False
+            
+        logger.info(f"Connected to model: {self.model_interface.model_name}")
+        return True
 
     async def start(self):
         """
@@ -80,7 +93,11 @@ class StrapToServer:
             )
 
         try:
-            await self.connect()
+            # Connect components and check success
+            if not await self.connect():
+                logger.error("Failed to connect required components")
+                return
+                
             while self.running:
                 await asyncio.sleep(1)  # Main loop tick.
         except Exception as e:

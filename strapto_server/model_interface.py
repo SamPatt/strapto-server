@@ -132,35 +132,72 @@ class GenericModelInterface(ModelInterface):
         await self._output_queue.put(output)
 
 class OllamaInterface(ModelInterface):
-    """
-    Implementation of ModelInterface for Ollama.
-    """
+    """Implementation of ModelInterface for Ollama."""
     
     def __init__(self, config: Optional[ServerConfig] = None):
         super().__init__(config)
         self.base_url = "http://localhost:11434"
-        self.model_name = config.model_name if config and config.model_name else "llama2"
+        self.model_name = None  # We'll detect this during connection
         self.session = None
         self._watch_task = None
         self._watching = False
 
+    async def _get_available_model(self) -> Optional[str]:
+        """
+        Get an available model, prioritizing:
+        1. Currently running models
+        2. Locally available models
+        """
+        try:
+            # First check for any running models
+            async with self.session.get(f"{self.base_url}/api/ps") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if models := data.get('models', []):
+                        # Use the first running model
+                        self.model_name = models[0]['name']
+                        logger.info(f"Using running model: {self.model_name}")
+                        return self.model_name
+
+            # If no running models, check locally available models
+            async with self.session.get(f"{self.base_url}/api/tags") as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if models := data.get('models', []):
+                        # Use the first available model
+                        self.model_name = models[0]['name']
+                        logger.info(f"Using available model: {self.model_name}")
+                        return self.model_name
+                
+            logger.warning("No models found. Please install a model using 'ollama pull <model>'")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error checking Ollama models: {e}")
+            return None
+
     async def connect(self) -> bool:
-        """Connect to local Ollama instance."""
+        """Connect to local Ollama instance and detect available model."""
         try:
             import aiohttp
             self.session = aiohttp.ClientSession()
             
             # Test connection by getting version
             async with self.session.get(f"{self.base_url}/api/version") as response:
-                if response.status == 200:
-                    self.ready = True
-                    logger.info(f"Connected to Ollama (model: {self.model_name})")
-                    # Start the watcher when connection is established
-                    await self.start_watching()
-                    return True
-                else:
+                if response.status != 200:
                     logger.error(f"Failed to connect to Ollama: HTTP {response.status}")
                     return False
+
+            # If no model specified in config, auto-detect
+            if not self.model_name:
+                if not await self._get_available_model():
+                    return False
+
+            self.ready = True
+            logger.info(f"Connected to Ollama (model: {self.model_name})")
+            await self.start_watching()
+            return True
+            
         except Exception as e:
             logger.error(f"Failed to connect to Ollama: {e}")
             return False
@@ -263,6 +300,8 @@ class OllamaInterface(ModelInterface):
                     **content  # Include any additional parameters
                 }
 
+            logger.debug(f"Sending request to Ollama: {data}")  # Debug log
+            
             async with self.session.post(f"{self.base_url}/api/generate", json=data) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -276,6 +315,7 @@ class OllamaInterface(ModelInterface):
                         
                     try:
                         result = json.loads(line)
+                        logger.debug(f"Received response from Ollama: {result}")  # Debug log
                         
                         # Create model output from response
                         output = ModelOutput(
