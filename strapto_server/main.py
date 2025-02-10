@@ -18,6 +18,7 @@ import asyncio
 import logging
 import signal
 from typing import Optional, Set
+import sys
 
 from .config import get_config, ServerConfig
 from .webrtc_manager import WebRTCManager
@@ -54,6 +55,36 @@ class StrapToServer:
         self.running = False
         self.tasks: Set[asyncio.Task] = set()
 
+    async def watch_model_outputs(self):
+        """Watch and display all Ollama activity in the terminal."""
+        try:
+            async for output in self.model_interface.get_outputs():
+                if output.output_type == "text":
+                    print(output.content, end="", flush=True)
+                elif output.output_type == "status":
+                    # Show more detailed status information
+                    status = output.content
+                    print("\n[Ollama Status]", flush=True)
+                    if "model_name" in status:
+                        print(f"  Model: {status['model_name']}")
+                    if "status" in status:
+                        print(f"  State: {status['status']}")
+                    if "total_duration" in status:
+                        print(f"  Duration: {status['total_duration']}ms")
+                    print("", flush=True)  # Extra newline for readability
+                elif output.output_type == "error":
+                    print(f"\n[Error] {output.content}", file=sys.stderr, flush=True)
+                
+                # Show completion metadata
+                if output.metadata and output.metadata.get("done", False):
+                    duration = output.metadata.get("total_duration", 0)
+                    tokens = output.metadata.get("eval_count", 0)
+                    print(f"\n[Complete] Generated {tokens} tokens in {duration}ms\n", flush=True)
+        except asyncio.CancelledError:
+            logger.debug("Model output watcher stopped")
+        except Exception as e:
+            logger.error(f"Error watching model outputs: {e}")
+
     async def connect(self):
         """Connect all components."""
         # WebRTC manager doesn't need explicit connection
@@ -65,10 +96,16 @@ class StrapToServer:
         connected = await self.model_interface.connect()
         if not connected:
             logger.error("Failed to connect to Ollama interface")
-            # You might want to handle this error case differently
             return False
             
         logger.info(f"Connected to model: {self.model_interface.model_name}")
+        
+        # Start watching model outputs
+        self.tasks.add(asyncio.create_task(
+            self.watch_model_outputs(), 
+            name="model_output_watcher"
+        ))
+        
         return True
 
     async def start(self):
@@ -98,8 +135,9 @@ class StrapToServer:
                 logger.error("Failed to connect required components")
                 return
                 
+            # Just run the main loop - no test prompt
             while self.running:
-                await asyncio.sleep(1)  # Main loop tick.
+                await asyncio.sleep(1)  # Main loop tick
         except Exception as e:
             logger.error(f"Critical error in server: {e}")
             raise

@@ -18,6 +18,8 @@ import logging
 import json
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 from dataclasses import dataclass
+import aiohttp
+import aiohttp.web as web
 
 from .config import ServerConfig, get_config
 
@@ -182,6 +184,13 @@ class OllamaInterface(ModelInterface):
             import aiohttp
             self.session = aiohttp.ClientSession()
             
+            # Start API wrapper
+            self.wrapper = OllamaAPIWrapper()
+            await self.wrapper.start()
+            
+            # Add our output handler
+            self.wrapper.handlers.append(self.handle_ollama_output)
+            
             # Test connection by getting version
             async with self.session.get(f"{self.base_url}/api/version") as response:
                 if response.status != 200:
@@ -232,48 +241,71 @@ class OllamaInterface(ModelInterface):
         logger.info("Stopped watching Ollama activity")
 
     async def _watch_ollama(self) -> None:
-        """Watch Ollama activity and capture outputs."""
+        """Watch Ollama server activity."""
         import time
+        
+        last_status = {}  # Track last status to avoid duplicates
         
         while self._watching:
             try:
-                # Check for running models
+                # Monitor /api/ps endpoint for running models
                 async with self.session.get(f"{self.base_url}/api/ps") as response:
                     if response.status == 200:
                         data = await response.json()
-                        running_models = data.get("models", [])
-                        
-                        if running_models:
-                            # Log active models for debugging
-                            model_names = [m.get("name") for m in running_models]
-                            logger.debug(f"Active Ollama models: {model_names}")
-                            
-                            # Create an output for each active model
-                            for model in running_models:
-                                output = ModelOutput(
-                                    content={
-                                        "model_name": model.get("name"),
-                                        "status": "active",
-                                        "size": model.get("size"),
-                                        "details": model.get("details", {})
-                                    },
-                                    output_type="status",
-                                    timestamp=time.time(),
-                                    metadata={
-                                        "size_vram": model.get("size_vram"),
-                                        "expires_at": model.get("expires_at")
-                                    }
-                                )
-                                await self._output_queue.put(output)
+                        if models := data.get('models', []):
+                            for model in models:
+                                current_status = {
+                                    "model_name": model["name"],
+                                    "status": "running",
+                                    "total_duration": model.get("total_duration"),
+                                    "size_vram": model.get("size_vram"),
+                                }
+                                
+                                # Only send status if it changed
+                                status_key = f"{model['name']}_{model.get('total_duration')}"
+                                if status_key not in last_status:
+                                    last_status[status_key] = current_status
+                                    output = ModelOutput(
+                                        content=current_status,
+                                        output_type="status",
+                                        timestamp=time.time()
+                                    )
+                                    await self._output_queue.put(output)
                 
-                # Wait before next check
-                await asyncio.sleep(1.0)  # Adjust polling interval as needed
-                
+                # Add a reasonable delay between checks
+                await asyncio.sleep(5.0)  # Check every 5 seconds
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error watching Ollama: {e}")
+                # Send error as output
+                error_output = ModelOutput(
+                    content=f"Ollama watcher error: {str(e)}",
+                    output_type="error",
+                    timestamp=time.time()
+                )
+                await self._output_queue.put(error_output)
                 await asyncio.sleep(5.0)  # Longer delay on error
+
+    async def handle_ollama_output(self, data: bytes):
+        """Handle intercepted Ollama output"""
+        try:
+            result = json.loads(data)
+            output = ModelOutput(
+                content=result.get("response", ""),
+                output_type="text",
+                timestamp=time.time(),
+                metadata={
+                    "done": result.get("done", False),
+                    "total_duration": result.get("total_duration"),
+                    "eval_count": result.get("eval_count"),
+                    "eval_duration": result.get("eval_duration")
+                }
+            )
+            await self._output_queue.put(output)
+        except Exception as e:
+            logger.error(f"Error handling Ollama output: {e}")
 
     async def send_input(self, content: Union[str, Dict[str, Any]]) -> None:
         """Send prompt to Ollama and stream responses."""
@@ -349,6 +381,66 @@ class OllamaInterface(ModelInterface):
                 timestamp=time.time()
             )
             await self._output_queue.put(error_output)
+
+class OllamaProxy:
+    def __init__(self, target_port=11434, proxy_port=11435):
+        self.target_port = target_port
+        self.proxy_port = proxy_port
+        self.handlers = []
+
+    async def handle_request(self, request):
+        # Forward request to real Ollama
+        async with aiohttp.ClientSession() as session:
+            # Forward the request
+            url = f"http://localhost:{self.target_port}{request.path}"
+            method = request.method
+            headers = request.headers
+            body = await request.read()
+
+            async with session.request(method, url, headers=headers, data=body) as resp:
+                # If it's a generate request, intercept the stream
+                if request.path == "/api/generate":
+                    async for line in resp.content:
+                        # Forward to client
+                        yield line
+                        # Also send to our handlers
+                        for handler in self.handlers:
+                            await handler(line)
+                else:
+                    # For non-generate requests, just forward response
+                    yield await resp.read()
+
+class OllamaSocketProxy:
+    def __init__(self, original_socket="/run/ollama/ollama.sock"):
+        self.original_socket = original_socket
+        self.proxy_socket = "/run/ollama/proxy.sock"
+        self.handlers = []
+
+    async def start(self):
+        # Create proxy socket
+        server = await asyncio.start_unix_server(
+            self.handle_connection, self.proxy_socket
+        )
+
+class OllamaAPIWrapper:
+    def __init__(self, base_url="http://localhost:11434"):
+        self.base_url = base_url
+        self.original_generate = f"{base_url}/api/generate"
+        self.handlers = []
+        
+    async def start(self):
+        app = web.Application()
+        app.router.add_route('POST', '/api/generate', self.handle_generate)
+        # ... other routes
+        
+    async def handle_generate(self, request):
+        # Forward to real Ollama and intercept response
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.original_generate, json=await request.json()) as resp:
+                return web.StreamResponse(
+                    status=resp.status,
+                    headers=resp.headers
+                )
 
 def create_model_interface(model_type: str, config: Optional[ServerConfig] = None) -> ModelInterface:
     """
