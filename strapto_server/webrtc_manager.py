@@ -282,6 +282,21 @@ class WebRTCManager:
         except Exception as e:
             logger.error(f"Error processing offer from peer {peer_id}: {e}")
             raise
+    
+    async def handle_offer(self, sdp: str, client_id: str) -> Dict[str, str]:
+        """
+        Handle WebRTC offer from client (wrapper for process_offer with different signature).
+        
+        Args:
+            sdp: SDP offer string
+            client_id: Client identifier
+            
+        Returns:
+            Dict containing answer SDP and type
+        """
+        answer_str = await self.process_offer(client_id, sdp)
+        answer_dict = json.loads(answer_str)
+        return answer_dict
 
     async def process_ice_candidate(self, peer_id: str, candidate: str) -> None:
         """
@@ -309,6 +324,25 @@ class WebRTCManager:
             logger.error(f"Invalid ICE candidate from peer {peer_id}. Error: {e}. Candidate: {candidate}")
         except Exception as e:
             logger.error(f"Error processing ICE candidate from peer {peer_id}: {e}")
+    
+    async def handle_ice_candidate(self, candidate: str, sdp_mline_index: int, sdp_mid: str, client_id: str) -> None:
+        """
+        Handle ICE candidate from client (wrapper for process_ice_candidate with different signature).
+        
+        Args:
+            candidate: ICE candidate string
+            sdp_mline_index: SDP m-line index
+            sdp_mid: SDP media ID
+            client_id: Client identifier
+        """
+        # Build the candidate JSON string
+        candidate_dict = {
+            "candidate": candidate,
+            "sdpMLineIndex": sdp_mline_index,
+            "sdpMid": sdp_mid
+        }
+        candidate_str = json.dumps(candidate_dict)
+        await self.process_ice_candidate(client_id, candidate_str)
 
     async def close_peer_connection(self, peer_id: str) -> None:
         """
@@ -348,6 +382,22 @@ class WebRTCManager:
             peer_id: peer_info.metrics
             for peer_id, peer_info in self.peers.items()
         }
+    
+    def get_active_channel_count(self) -> int:
+        """
+        Get the count of active data channels.
+        
+        Returns:
+            int: Number of open data channels
+        """
+        return sum(
+            1 for peer_info in self.peers.values()
+            if peer_info.data_channel and peer_info.data_channel.readyState == "open"
+        )
+    
+    async def disconnect(self) -> None:
+        """Disconnect all peer connections."""
+        await self.close_all_connections()
 
     async def _handle_model_output(self, event: Event) -> None:
         """

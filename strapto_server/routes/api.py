@@ -50,7 +50,7 @@ async def server_status(request: web.Request) -> web.Response:
             "uptime": uptime,
         },
         "webrtc": {
-            "active_connections": len(webrtc.active_connections),
+            "active_connections": len(webrtc.peers),
             "data_channels": webrtc.get_active_channel_count(),
         },
         "model": {
@@ -175,7 +175,7 @@ async def reset_model(request: web.Request) -> web.Response:
             )
             
         await model.disconnect()
-        await model.connect(request.app['config'])
+        await model.connect()
         
         return web.json_response({
             "status": "reset_complete",

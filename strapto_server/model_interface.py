@@ -53,7 +53,30 @@ class ModelInterface(abc.ABC):
         self.config = config or get_config()
         self.ready = False
         self._output_queue = asyncio.Queue()
+        self._connection_status = "disconnected"
+        self._last_activity_timestamp: Optional[float] = None
+        self._is_connecting = False
         logger.info(f"Initializing {self.__class__.__name__}")
+    
+    @property
+    def connection_status(self) -> str:
+        """Get the current connection status."""
+        return self._connection_status
+    
+    @property
+    def last_activity_timestamp(self) -> Optional[float]:
+        """Get the timestamp of the last activity."""
+        return self._last_activity_timestamp
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if the interface is connected."""
+        return self.ready and self._connection_status == "connected"
+    
+    @property
+    def is_connecting(self) -> bool:
+        """Check if the interface is currently connecting."""
+        return self._is_connecting
 
     @abc.abstractmethod
     async def connect(self) -> bool:
@@ -106,17 +129,28 @@ class GenericModelInterface(ModelInterface):
     """
     
     async def connect(self) -> bool:
-        self.ready = True
-        logger.info("Connected to generic model interface")
-        return True
+        self._is_connecting = True
+        self._connection_status = "connecting"
+        try:
+            self.ready = True
+            self._connection_status = "connected"
+            self._last_activity_timestamp = time.time()
+            logger.info("Connected to generic model interface")
+            return True
+        finally:
+            self._is_connecting = False
 
     async def disconnect(self) -> None:
+        self._connection_status = "disconnecting"
         self.ready = False
+        self._connection_status = "disconnected"
         logger.info("Disconnected from generic model interface")
 
     async def send_input(self, content: Union[str, Dict[str, Any]]) -> None:
         """Echo the input back as an output."""
         import time
+        
+        self._last_activity_timestamp = time.time()
         
         if isinstance(content, str):
             output = ModelOutput(
@@ -180,8 +214,11 @@ class OllamaInterface(ModelInterface):
 
     async def connect(self) -> bool:
         """Connect to local Ollama instance and detect available model."""
+        self._is_connecting = True
+        self._connection_status = "connecting"
         try:
             import aiohttp
+            import time
             self.session = aiohttp.ClientSession()
             
             # Start API wrapper
@@ -195,28 +232,37 @@ class OllamaInterface(ModelInterface):
             async with self.session.get(f"{self.base_url}/api/version") as response:
                 if response.status != 200:
                     logger.error(f"Failed to connect to Ollama: HTTP {response.status}")
+                    self._connection_status = "failed"
                     return False
 
             # If no model specified in config, auto-detect
             if not self.model_name:
                 if not await self._get_available_model():
+                    self._connection_status = "failed"
                     return False
 
             self.ready = True
+            self._connection_status = "connected"
+            self._last_activity_timestamp = time.time()
             logger.info(f"Connected to Ollama (model: {self.model_name})")
             await self.start_watching()
             return True
             
         except Exception as e:
             logger.error(f"Failed to connect to Ollama: {e}")
+            self._connection_status = "failed"
             return False
+        finally:
+            self._is_connecting = False
 
     async def disconnect(self) -> None:
         """Disconnect from Ollama and stop watching."""
+        self._connection_status = "disconnecting"
         await self.stop_watching()
         if self.session:
             await self.session.close()
         self.ready = False
+        self._connection_status = "disconnected"
         logger.info("Disconnected from Ollama")
 
     async def start_watching(self) -> None:
@@ -290,8 +336,10 @@ class OllamaInterface(ModelInterface):
 
     async def handle_ollama_output(self, data: bytes):
         """Handle intercepted Ollama output"""
+        import time
         try:
             result = json.loads(data)
+            self._last_activity_timestamp = time.time()
             output = ModelOutput(
                 content=result.get("response", ""),
                 output_type="text",
@@ -316,6 +364,9 @@ class OllamaInterface(ModelInterface):
             return
 
         try:
+            # Update activity timestamp
+            self._last_activity_timestamp = time.time()
+            
             # Convert input to appropriate format
             if isinstance(content, str):
                 data = {
@@ -348,6 +399,9 @@ class OllamaInterface(ModelInterface):
                     try:
                         result = json.loads(line)
                         logger.debug(f"Received response from Ollama: {result}")  # Debug log
+                        
+                        # Update activity timestamp on each response
+                        self._last_activity_timestamp = time.time()
                         
                         # Create model output from response
                         output = ModelOutput(

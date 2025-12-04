@@ -19,11 +19,13 @@ import logging
 import signal
 from typing import Optional, Set
 import sys
+from aiohttp import web
 
 from .config import get_config, ServerConfig
 from .webrtc_manager import WebRTCManager
 from .model_interface import create_model_interface
 from .event_handler import EventEmitter
+from .routes import setup_routes
 
 # Configure logging
 logging.basicConfig(
@@ -54,6 +56,8 @@ class StrapToServer:
         
         self.running = False
         self.tasks: Set[asyncio.Task] = set()
+        self.app: Optional[web.Application] = None
+        self.runner: Optional[web.AppRunner] = None
 
     async def watch_model_outputs(self):
         """Watch and display all Ollama activity in the terminal."""
@@ -108,6 +112,32 @@ class StrapToServer:
         
         return True
 
+    async def start_http_server(self):
+        """Start the HTTP server with API routes."""
+        self.app = web.Application()
+        
+        # Setup routes
+        setup_routes(
+            app=self.app,
+            config=self.config,
+            webrtc_manager=self.webrtc_manager,
+            model_interface=self.model_interface,
+            event_emitter=self.event_emitter
+        )
+        
+        # Create runner and start server
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
+        
+        site = web.TCPSite(
+            self.runner,
+            host=self.config.host,
+            port=self.config.port
+        )
+        
+        await site.start()
+        logger.info(f"HTTP server started on http://{self.config.host}:{self.config.port}")
+
     async def start(self):
         """
         Start the server and all its components.
@@ -134,8 +164,11 @@ class StrapToServer:
             if not await self.connect():
                 logger.error("Failed to connect required components")
                 return
-                
-            # Just run the main loop - no test prompt
+            
+            # Start HTTP server
+            await self.start_http_server()
+            
+            # Run the main loop
             while self.running:
                 await asyncio.sleep(1)  # Main loop tick
         except Exception as e:
@@ -169,6 +202,14 @@ class StrapToServer:
                     await task
                 except asyncio.CancelledError:
                     pass
+
+        # Stop HTTP server
+        if self.runner:
+            try:
+                await self.runner.cleanup()
+                logger.info("HTTP server stopped")
+            except Exception as e:
+                logger.error(f"Error stopping HTTP server: {e}")
 
         # Disconnect components in reverse order
         try:
