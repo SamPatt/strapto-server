@@ -1,7 +1,8 @@
 import asyncio
 import pytest
 import json
-from strapto_server.model_interface import create_model_interface
+from unittest.mock import AsyncMock
+from strapto_server.model_interface import create_model_interface, OllamaInterface
 from strapto_server.config import get_config
 
 def print_model_output(output, prefix=""):
@@ -130,6 +131,189 @@ async def test_model_detection_priority():
     finally:
         if interface.session:
             await interface.disconnect()
+
+# Unit tests for _get_available_model with mocking
+@pytest.mark.asyncio
+async def test_get_available_model_with_running_model():
+    """Test _get_available_model prioritizes running models"""
+    interface = OllamaInterface()
+    
+    # Create a mock response class that works as an async context manager
+    class MockResponse:
+        def __init__(self, status=200, json_data=None):
+            self.status = status
+            self._json_data = json_data or {}
+        
+        async def json(self):
+            return self._json_data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, *args):
+            pass
+    
+    # Create a mock session with get method that returns async context manager
+    mock_session = AsyncMock()
+    def mock_get(url):
+        if '/api/ps' in url:
+            return MockResponse(200, {'models': [{'name': 'llama2:latest'}]})
+        return MockResponse(200, {'models': []})
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    model = await interface._get_available_model()
+    assert model == 'llama2:latest'
+    assert interface.model_name == 'llama2:latest'
+
+@pytest.mark.asyncio
+async def test_get_available_model_fallback_to_available():
+    """Test _get_available_model falls back to available models when none running"""
+    interface = OllamaInterface()
+    
+    class MockResponse:
+        def __init__(self, status=200, json_data=None):
+            self.status = status
+            self._json_data = json_data or {}
+        
+        async def json(self):
+            return self._json_data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, *args):
+            pass
+    
+    mock_session = AsyncMock()
+    def mock_get(url):
+        if '/api/ps' in url:
+            return MockResponse(200, {'models': []})  # No running models
+        elif '/api/tags' in url:
+            return MockResponse(200, {'models': [{'name': 'mistral:latest'}]})
+        return MockResponse(200, {'models': []})
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    model = await interface._get_available_model()
+    assert model == 'mistral:latest'
+    assert interface.model_name == 'mistral:latest'
+
+@pytest.mark.asyncio
+async def test_get_available_model_no_models_found():
+    """Test _get_available_model returns None when no models available"""
+    interface = OllamaInterface()
+    
+    class MockResponse:
+        def __init__(self, status=200, json_data=None):
+            self.status = status
+            self._json_data = json_data or {}
+        
+        async def json(self):
+            return self._json_data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, *args):
+            pass
+    
+    mock_session = AsyncMock()
+    def mock_get(url):
+        return MockResponse(200, {'models': []})  # No models
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    model = await interface._get_available_model()
+    assert model is None
+    assert interface.model_name is None
+
+@pytest.mark.asyncio
+async def test_get_available_model_handles_errors():
+    """Test _get_available_model handles exceptions gracefully"""
+    interface = OllamaInterface()
+    
+    mock_session = AsyncMock()
+    def mock_get(url):
+        raise Exception("Connection error")
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    model = await interface._get_available_model()
+    assert model is None
+
+@pytest.mark.asyncio
+async def test_get_available_model_handles_non_200_response():
+    """Test _get_available_model handles non-200 HTTP responses"""
+    interface = OllamaInterface()
+    
+    class MockResponse:
+        def __init__(self, status=200, json_data=None):
+            self.status = status
+            self._json_data = json_data or {}
+        
+        async def json(self):
+            return self._json_data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, *args):
+            pass
+    
+    mock_session = AsyncMock()
+    def mock_get(url):
+        # Both endpoints return 500 error
+        return MockResponse(500, {})
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    # The method checks response.status == 200, so non-200 responses are skipped
+    # It should return None when both endpoints fail
+    model = await interface._get_available_model()
+    assert model is None
+
+@pytest.mark.asyncio
+async def test_get_available_model_prefers_first_running_model():
+    """Test that _get_available_model selects the first running model"""
+    interface = OllamaInterface()
+    
+    class MockResponse:
+        def __init__(self, status=200, json_data=None):
+            self.status = status
+            self._json_data = json_data or {}
+        
+        async def json(self):
+            return self._json_data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, *args):
+            pass
+    
+    mock_session = AsyncMock()
+    def mock_get(url):
+        if '/api/ps' in url:
+            return MockResponse(200, {
+                'models': [
+                    {'name': 'llama2:latest'},
+                    {'name': 'mistral:latest'},
+                    {'name': 'codellama:latest'}
+                ]
+            })
+        return MockResponse(200, {'models': []})
+    
+    mock_session.get = mock_get
+    interface.session = mock_session
+    
+    model = await interface._get_available_model()
+    assert model == 'llama2:latest'  # Should pick the first one
 
 if __name__ == "__main__":
     asyncio.run(test_ollama_connection()) 
